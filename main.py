@@ -41,7 +41,7 @@ DATABASE_URL = os.getenv(
 )
 
 TABLE = {
-    'table': os.getenv('TILE_TABLE_NAME', 'five_year'),
+    # 'table': os.getenv('TILE_TABLE_NAME', 'five_year'),
     'srid': os.getenv('TILE_TABLE_SRID', '4326'),
     'h3inxColumn': os.getenv('TILE_TABLE_H3INX_COLUMN', 'h3_ix'),
     'h3inxRes': os.getenv('TILE_TABLE_H3INX_RESOLUTION', 8),
@@ -55,10 +55,10 @@ async def get_db_pool():
     return await asyncpg.create_pool(DATABASE_URL)
 
 @cached(cache)
-async def get_tile(zoom: int, x: int, y: int, pool):
+async def get_tile(table_name:str, zoom: int, x: int, y: int, pool):
     async with pool.acquire() as conn:
         env = tile_to_envelope(zoom, x, y)
-        sql = envelope_to_sql(env)
+        sql = envelope_to_sql(env,table_name)
         return await conn.fetchval(sql)
 
 def tile_to_envelope(zoom: int, x: int, y: int):
@@ -79,6 +79,7 @@ def tile_to_envelope(zoom: int, x: int, y: int):
 
 @app.post("/query")
 async def execute_query(
+    table_name: str = Body(...),
     geometry: dict = Body(...),
     less_than: int = Body(...),
     greater_than: int = Body(...),
@@ -90,7 +91,7 @@ async def execute_query(
         query = f"""
         WITH t1 AS (
             SELECT *
-            FROM five_year el
+            FROM {table_name} el
             WHERE h3_ix = ANY (
                 get_h3_indexes(
                     ST_GeomFromGeoJSON('{geojson}'), 8
@@ -118,9 +119,18 @@ def envelope_to_bounds_sql(env):
     sql_tmpl = 'ST_Segmentize(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}, 3857), {segSize})'
     return sql_tmpl.format(**env)
 
-def envelope_to_sql(env):
-    tbl = TABLE.copy()
-    tbl['env'] = envelope_to_bounds_sql(env)
+def envelope_to_sql(env,table_name):
+
+    tbl = {
+        'table': table_name,
+        'srid': os.getenv('TILE_TABLE_SRID', '4326'),
+        'h3inxColumn': os.getenv('TILE_TABLE_H3INX_COLUMN', 'h3_ix'),
+        'h3inxRes': os.getenv('TILE_TABLE_H3INX_RESOLUTION', 8),
+        'attrColumns': os.getenv('TILE_TABLE_ATTR_COLUMNS', 'band1'),
+        'env': envelope_to_bounds_sql(env)
+    }
+    # tbl = TABLE.copy()
+    # tbl['env'] = envelope_to_bounds_sql(env)
     sql_tmpl = """
         WITH
         bounds AS (
@@ -145,8 +155,8 @@ async def startup_event():
 async def shutdown_event():
     await app.state.pool.close()
 
-@app.get("/flood5yr/{zoom}/{x}/{y}.{format}")
-async def get_mvt_tile(zoom: int, x: int, y: int, format: str):
+@app.get("/{table_name}/{zoom}/{x}/{y}.{format}")
+async def get_mvt_tile(table_name: str, zoom: int, x: int, y: int, format: str):
     if format not in ['pbf', 'mvt']:
         raise HTTPException(status_code=400, detail="Invalid format. Use 'pbf' or 'mvt'.")
 
@@ -155,7 +165,7 @@ async def get_mvt_tile(zoom: int, x: int, y: int, format: str):
         raise HTTPException(status_code=400, detail="Invalid tile coordinates.")
 
     try:
-        pbf = await get_tile(zoom, x, y, app.state.pool)
+        pbf = await get_tile(table_name, zoom, x, y, app.state.pool)
         return Response(content=pbf, media_type="application/vnd.mapbox-vector-tile")
     except Exception as e:
         # raise e
